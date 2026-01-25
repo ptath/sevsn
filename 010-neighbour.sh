@@ -21,61 +21,94 @@ mqtt_server="mqtt.sevsn.ru"
 mqtt_port="1883"
 mqtt_topic="users/$kadastr_no/internet_state"
 
-# Функция: определить провайдера по публичному IP
+# Путь к кешу
+CACHE_FILE="/tmp/provider_cache.txt"
+
+# Функция: получить кешированные данные
+get_cached_provider() {
+    if [ -f "$CACHE_FILE" ]; then
+        . "$CACHE_FILE"  # Загружаем переменные из файла
+        echo "$cached_provider"
+    else
+        echo ""
+    fi
+}
+
+# Функция: сохранить в кеш
+save_to_cache() {
+    local ip="$1"
+    local provider="$2"
+    echo "cached_ip='$ip'" > "$CACHE_FILE"
+    echo "cached_provider='$provider'" >> "$CACHE_FILE"
+}
+
+# Функция: определить провайдера по публичному IP (с кешированием)
 get_provider_by_ip() {
-    # Получаем публичный IP (через внешний сервис)
+    # Получаем текущий публичный IP
     public_ip=$(curl -s https://api.ipify.org)
     if [ -z "$public_ip" ]; then
         echo "Не удалось определить IP адрес"
         return
     fi
 
-    # Делаем whois-запрос и ищем организацию
-    # (ВНИМАНИЕ!!! Требуется установить whois - opkg install whois)
+    # Проверяем кеш: если IP не изменился, возвращаем кешированный провайдер
+    cached_provider=$(get_cached_provider)
+    if [ -n "$cached_provider" ]; then
+        . "$CACHE_FILE"  # Перезагружаем переменные
+        if [ "$cached_ip" = "$public_ip" ]; then
+            echo "$cached_provider"
+            return
+        fi
+    fi
+
+    # Если IP изменился или кеша нет — делаем whois
     whois_data=$(whois "$public_ip" 2>/dev/null)
-    
-    # Проверяем ключевые слова
+
+    # Определяем провайдера
     case "$whois_data" in
         *Dom.ru*|*DOM.RU*|*ERTH*|*"Дом.ру"*)
-            echo "Дом.ру"
+            provider="Дом.ру"
             ;;
         *SCTS*|*IKORP*)
-            echo "iKorp"        
+            provider="iKorp"
             ;;
         *TELE2*|*tele2*)
-            echo "TELE2"        
-            ;;                    
+            provider="TELE2"
+            ;;
         *Rostelecom*|*Ростелеком*)
-            echo "Ростелеком"
+            provider="Ростелеком"
             ;;
         *Megafon*|*Мегафон*)
-            echo "Мегафон"
+            provider="Мегафон"
             ;;
         *MT_Russia*|*MTS*|*МТС*)
-            echo "МТС"
+            provider="МТС"
             ;;
         *)
-            # Если не нашли
-            echo "Неизвестный провайдер"
+            provider="Неизвестный провайдер"
             ;;
     esac
+
+    # Сохраняем в кеш
+    save_to_cache "$public_ip" "$provider"
+    echo "$provider"
 }
 
-# Получаем название провайдера
+# Получаем название провайдера (с использованием кеша)
 provider_name=$(get_provider_by_ip)
 
 # Проверяем доступность Яндекса
-yandex_check_time=$(ping -c 3 -W 1 yandex.ru > /dev/null 2>&1; \
+yandex_check_time=$(ping -c 2 -W 1 yandex.ru > /dev/null 2>&1; \
     if [ $? -eq 0 ]; then date +%s; else echo "0"; fi)
 
 # Проверяем доступность Cloudflare
-cloudflare_check_time=$(ping -c 3 -W 1 1.1.1.1 > /dev/null 2>&1; \
+cloudflare_check_time=$(ping -c 2 -W 1 1.1.1.1 > /dev/null 2>&1; \
     if [ $? -eq 0 ]; then date +%s; else echo "0"; fi)
 
 # Формируем JSON
-json_payload="{\"provider\": \"$provider_name\", 
-		\"yandex_check_time\": $yandex_check_time, 
-		\"cloudflare_check_time\": $cloudflare_check_time}"
+json_payload="{\"provider\": \"$provider_name\",
+    \"yandex_check_time\": $yandex_check_time,
+    \"cloudflare_check_time\": $cloudflare_check_time}"
 
 # Публикуем JSON в MQTT
 mosquitto_pub -d \
